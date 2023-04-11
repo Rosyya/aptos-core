@@ -2,5 +2,4 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod pb;
-pub use pb::aptos::*;
-pub use pb::google;
+pub use pb::{aptos::*, google};

@@ -5,16 +5,18 @@ use crate::{modules::get_account_modules, resources::get_resources};
 use anyhow::{Context as AnyhowContext, Result};
 use aptos_api::context::Context;
 use aptos_logger::info;
-use aptos_protos::api::v2::{
-    api_v2_server::{ApiV2, ApiV2Server},
-    GetAccountModulesRequest, GetAccountModulesResponse, GetResourcesRequest, GetResourcesResponse,
-    FILE_DESCRIPTOR_SET as API_V2_FILE_DESCRIPTOR_SET,
+use aptos_protos::{
+    api::v2::{
+        api_v2_server::{ApiV2, ApiV2Server},
+        GetAccountModulesRequest, GetAccountModulesResponse, GetResourcesRequest,
+        GetResourcesResponse, FILE_DESCRIPTOR_SET as API_V2_FILE_DESCRIPTOR_SET,
+    },
+    google::api::v1::FILE_DESCRIPTOR_SET as GOOGLE_API_V1_FILE_DESCRIPTOR_SET,
+    transaction::testing1::v1::FILE_DESCRIPTOR_SET as TRANSACTION_V1_TESTING_FILE_DESCRIPTOR_SET,
+    util::timestamp::FILE_DESCRIPTOR_SET as UTIL_TIMESTAMP_FILE_DESCRIPTOR_SET,
 };
-use aptos_protos::transaction::testing1::v1::FILE_DESCRIPTOR_SET as TRANSACTION_V1_TESTING_FILE_DESCRIPTOR_SET;
-use aptos_protos::util::timestamp::FILE_DESCRIPTOR_SET as UTIL_TIMESTAMP_FILE_DESCRIPTOR_SET;
-use aptos_protos::google::api::v1::FILE_DESCRIPTOR_SET as GOOGLE_API_V1_FILE_DESCRIPTOR_SET;
-use protoc_wkt::google::protobuf::{FILE_DESCRIPTOR_SET as GOOGLE_PROTOBUF_FILE_DESCRIPTOR_SET};
 use poem::{endpoint::TowerCompatExt, IntoEndpoint, Route};
+use protoc_wkt::google::protobuf::FILE_DESCRIPTOR_SET as GOOGLE_PROTOBUF_FILE_DESCRIPTOR_SET;
 use std::sync::Arc;
 //use sync_wrapper::SyncWrapper;
 use tonic::{transport::Server, Request, Response, Status};
