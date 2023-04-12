@@ -7,7 +7,8 @@ pub mod validate;
 pub use components::{ReleaseConfig, ReleaseEntry};
 use once_cell::sync::Lazy;
 
-const RELEASE_CONFIG: &str = include_str!("../data/release.yaml");
+// Update me after branch cut.
+const RELEASE_CONFIG: &str = include_str!("../data/release-v1.4.yaml");
 
 static CURRENT_RELEASE_CONFIG: Lazy<ReleaseConfig> =
     Lazy::new(|| ReleaseConfig::parse(RELEASE_CONFIG).expect("YAML NOT PARSABLE"));

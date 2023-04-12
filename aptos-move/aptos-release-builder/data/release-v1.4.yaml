@@ -1,0 +1,23 @@
+---
+testnet: true
+remote_endpoint: ~
+is_multi_step: true
+update_sequence:
+  - Framework:
+      bytecode_version: 6
+      git_hash: ~
+  - FeatureFlag:
+      enabled:
+        - code_dependency_check
+        - treat_friend_as_private
+        - sha512_and_ripe_md160_natives
+        - aptos_std_chain_id_natives
+        - v_m_binary_format_v6
+        - multi_ed25519_pk_validate_v2_natives
+        - blake2b256_native
+        - resource_groups
+        - multisig_accounts
+        - delegation_pools
+        - ed25519_pubkey_validate_return_false_wrong_length
+        - struct_constructors
+      disabled: []
