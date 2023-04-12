@@ -15,7 +15,7 @@ use move_core_types::account_address::AccountAddress;
 use rand::{seq::SliceRandom, thread_rng};
 use std::{
     cmp::{Ordering, Reverse},
-    collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet, VecDeque},
     hash::Hash,
     time::{Duration, Instant},
 };
@@ -141,19 +141,32 @@ impl MempoolProxy {
     }
 }
 
+#[derive(PartialEq, Eq, Hash, Clone)]
+struct BatchKey {
+    author: PeerId,
+    batch_id: BatchId,
+}
+
+impl BatchKey {
+    pub fn from_info(info: &BatchInfo) -> Self {
+        Self {
+            author: info.author(),
+            batch_id: info.batch_id(),
+        }
+    }
+}
+
 #[derive(PartialEq, Eq, Clone)]
 struct BatchSortKey {
-    // ascending
+    batch_key: BatchKey,
     gas_bucket_start: u64,
-    // descending
-    batch_id: BatchId,
 }
 
 impl BatchSortKey {
     pub fn from_info(info: &BatchInfo) -> Self {
         Self {
+            batch_key: BatchKey::from_info(info),
             gas_bucket_start: info.gas_bucket_start(),
-            batch_id: info.batch_id(),
         }
     }
 }
@@ -172,16 +185,68 @@ impl Ord for BatchSortKey {
             ordering => return ordering,
         }
         // descending
-        other.batch_id.cmp(&self.batch_id)
+        other.batch_key.batch_id.cmp(&self.batch_key.batch_id)
+    }
+}
+
+#[derive(PartialEq, Eq, Clone)]
+struct BatchExpirationKey {
+    batch_sort_key: BatchSortKey,
+    expiration: u64,
+}
+
+impl BatchExpirationKey {
+    pub fn from_info(info: &BatchInfo) -> Self {
+        Self {
+            batch_sort_key: BatchSortKey::from_info(info),
+            expiration: info.expiration(),
+        }
+    }
+
+    pub fn split_key(timestamp: u64) -> Self {
+        Self {
+            batch_sort_key: BatchSortKey {
+                batch_key: BatchKey {
+                    author: AccountAddress::ZERO,
+                    batch_id: BatchId::new(0),
+                },
+                gas_bucket_start: 0,
+            },
+            expiration: timestamp,
+        }
+    }
+}
+
+impl PartialOrd<Self> for BatchExpirationKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for BatchExpirationKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // descending
+        match other.expiration.cmp(&self.expiration) {
+            Ordering::Equal => {},
+            ordering => return ordering,
+        }
+        // descending
+        other
+            .batch_sort_key
+            .batch_key
+            .batch_id
+            .cmp(&self.batch_sort_key.batch_key.batch_id)
     }
 }
 
 pub struct ProofQueue {
     my_peer_id: PeerId,
-    // Queue per peer to ensure fairness, includes insertion time
+    // Queue per peer to ensure fairness between peers and priority within peer
     author_to_batches: HashMap<PeerId, BTreeMap<BatchSortKey, BatchInfo>>,
     // ProofOfStore and insertion_time. None if committed
-    batch_to_proof: HashMap<BatchInfo, Option<(ProofOfStore, Instant)>>,
+    batch_to_proof: HashMap<BatchKey, Option<(ProofOfStore, Instant)>>,
+    // Expiration index
+    expirations: BTreeSet<BatchExpirationKey>,
     latest_block_timestamp: u64,
     remaining_txns: u64,
     remaining_proofs: u64,
@@ -195,6 +260,7 @@ impl ProofQueue {
             my_peer_id,
             author_to_batches: HashMap::new(),
             batch_to_proof: HashMap::new(),
+            expirations: BTreeSet::new(),
             latest_block_timestamp: 0,
             remaining_txns: 0,
             remaining_proofs: 0,
@@ -228,7 +294,8 @@ impl ProofQueue {
             counters::inc_rejected_pos_count(counters::POS_EXPIRED_LABEL);
             return;
         }
-        if self.batch_to_proof.get(proof.info()).is_some() {
+        let batch_key = BatchKey::from_info(proof.info());
+        if self.batch_to_proof.get(&batch_key).is_some() {
             counters::inc_rejected_pos_count(counters::POS_DUPLICATE_LABEL);
             return;
         }
@@ -239,8 +306,10 @@ impl ProofQueue {
 
         let queue = self.author_to_batches.entry(author).or_default();
         queue.insert(BatchSortKey::from_info(proof.info()), proof.info().clone());
+        self.expirations
+            .insert(BatchExpirationKey::from_info(proof.info()));
         self.batch_to_proof
-            .insert(proof.info().clone(), Some((proof, Instant::now())));
+            .insert(batch_key, Some((proof, Instant::now())));
 
         if author == self.my_peer_id {
             counters::inc_local_pos_count(bucket);
@@ -284,12 +353,12 @@ impl ProofQueue {
                 let to_skip = queue.len() - num_remaining;
 
                 let mut num_read = 0;
-                for (_, batch) in queue.iter().rev().skip(to_skip).take(num_remaining) {
+                for (sort_key, batch) in queue.iter().rev().skip(to_skip).take(num_remaining) {
                     num_read += 1;
                     if excluded_batches.contains(batch) {
                         excluded_txns += batch.num_txns();
                     } else if let Some(Some((proof, insertion_time))) =
-                        self.batch_to_proof.get(batch)
+                        self.batch_to_proof.get(&sort_key.batch_key)
                     {
                         cur_bytes += batch.num_bytes();
                         cur_txns += batch.num_txns();
@@ -337,41 +406,36 @@ impl ProofQueue {
         );
         self.latest_block_timestamp = block_timestamp;
 
-        let peers: Vec<_> = self.author_to_batches.keys().cloned().collect();
-        let mut num_expired_but_not_committed = 0;
+        let split_key = BatchExpirationKey::split_key(block_timestamp);
+        let expired = self.expirations.split_off(&split_key);
 
-        for peer in peers {
-            // TODO: revisit this. It's not so efficient, O(n*logn)
-            let mut queue = self.author_to_batches.remove(&peer).unwrap();
-            // TODO: a global expiration index?
-            let expired: Vec<_> = queue
-                .iter()
-                .filter(|(_, batch)| batch.expiration() < block_timestamp)
-                .map(|(key, _)| key)
-                .cloned()
-                .collect();
-            for key in expired {
-                if let Some(batch) = queue.remove(&key) {
+        let mut num_expired_but_not_committed = 0;
+        for expiration_key in &expired {
+            if let Some(mut queue) = self
+                .author_to_batches
+                .remove(&expiration_key.batch_sort_key.batch_key.author)
+            {
+                if let Some(batch) = queue.remove(&expiration_key.batch_sort_key) {
                     if self
                         .batch_to_proof
-                        .get(&batch)
+                        .get(&expiration_key.batch_sort_key.batch_key)
                         .expect("Entry for unexpired batch must exist")
                         .is_some()
                     {
                         // non-committed proof that is expired
                         num_expired_but_not_committed += 1;
-                        if batch.expiration() < block_timestamp {
-                            counters::GAP_BETWEEN_BATCH_EXPIRATION_AND_CURRENT_TIME_WHEN_COMMIT
-                                .observe((block_timestamp - batch.expiration()) as f64);
-                        }
+                        counters::GAP_BETWEEN_BATCH_EXPIRATION_AND_CURRENT_TIME_WHEN_COMMIT
+                            .observe((block_timestamp - batch.expiration()) as f64);
                         self.dec_remaining(&batch.author(), batch.num_txns());
                     }
-                    claims::assert_some!(self.batch_to_proof.remove(&batch));
+                    claims::assert_some!(self
+                        .batch_to_proof
+                        .remove(&expiration_key.batch_sort_key.batch_key));
                 }
-            }
-
-            if !queue.is_empty() {
-                self.author_to_batches.insert(peer, queue);
+                if !queue.is_empty() {
+                    self.author_to_batches
+                        .insert(expiration_key.batch_sort_key.batch_key.author, queue);
+                }
             }
         }
         counters::NUM_PROOFS_EXPIRED_WHEN_COMMIT.inc_by(num_expired_but_not_committed);
@@ -389,14 +453,15 @@ impl ProofQueue {
     // Mark in the hashmap committed PoS, but keep them until they expire
     pub(crate) fn mark_committed(&mut self, batches: Vec<BatchInfo>) {
         for batch in batches {
-            if let Some(Some((proof, insertion_time))) = self.batch_to_proof.get(&batch) {
+            let batch_key = BatchKey::from_info(&batch);
+            if let Some(Some((proof, insertion_time))) = self.batch_to_proof.get(&batch_key) {
                 counters::pos_to_commit(
                     proof.gas_bucket_start(),
                     insertion_time.elapsed().as_secs_f64(),
                 );
                 self.dec_remaining(&batch.author(), batch.num_txns());
             }
-            self.batch_to_proof.insert(batch, None);
+            self.batch_to_proof.insert(batch_key, None);
         }
     }
 }
